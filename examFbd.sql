@@ -14,9 +14,10 @@ BEGIN
     DECLARE reduction DECIMAL(5,2);
 
     -- Récupération du salaire horaire et du pourcentage du technicien
-    SELECT t.salaire_horaire_base, s.pourcentage 
+    SELECT f.salaire_horaire_base, s.pourcentage 
     INTO tech_salaire_horaire, tech_pourcentage 
     FROM technicien t 
+    JOIN fonction f ON t.idfonction = f.idfonction
     JOIN societe s ON t.idsociete = s.idsociete 
     WHERE t.idtech = tech_id;
 
@@ -71,6 +72,7 @@ BEGIN
     FROM intervention i
     JOIN client c ON i.idcli = c.idcli
     JOIN technicien t ON i.idtech = t.idtech
+    JOIN fonction f ON t.idfonction = f.idfonction
     JOIN societe s ON t.idsociete = s.idsociete
     WHERE i.idtech = tech_id AND i.date_debut_intervention = intervention_date;
 
@@ -86,3 +88,126 @@ BEGIN
 END|
 
 DELIMITER ;
+
+
+-- Début de la transaction
+START TRANSACTION;
+-- Premier appel à la procédure
+CALL procedure_intervention(1, '2023-05-10 10:32:00');
+-- Deuxième appel à la procédure
+CALL procedure_intervention(2, '2023-05-15 11:00:00');
+-- Troisième appel à la procédure
+CALL procedure_intervention(3, '2023-05-12 08:30:00');
+-- Quatrième appel à la procédure
+CALL procedure_intervention(4, '2023-04-25 10:00:00');
+-- Affichage du contenu de la table fact_intervention
+SELECT * FROM fact_intervention;
+-- Affichage du contenu de la table montant_par_societe
+SELECT * FROM montant_par_societe;
+-- Annulation des opérations effectuées dans la transaction
+ROLLBACK;
+
+-- 2
+-- Création de la table permanente "nombre_clients_par_carte"
+CREATE TABLE nombre_clients_par_carte (
+    intitule_carte VARCHAR(15) NOT NULL,
+    nombre_de_clients INT DEFAULT 0,
+    PRIMARY KEY (intitule_carte)
+)engine=innodb;
+
+-- Création des TRIGGERS
+DELIMITER |
+
+CREATE TRIGGER before_client_insert
+BEFORE INSERT ON client
+FOR EACH ROW
+BEGIN
+    IF NEW.typecarte NOT IN ('or', 'argent', 'bronze') THEN
+        SET NEW.typecarte = 'inconnue';
+    END IF;
+
+    -- Mise à jour de la table nombre_clients_par_carte
+    IF NEW.typecarte NOT IN ('or', 'argent', 'bronze') THEN
+        SET NEW.typecarte = 'inconnue';
+    END IF;
+
+    IF NOT EXISTS (
+        SELECT 1 FROM nombre_clients_par_carte WHERE intitule_carte = NEW.typecarte
+    ) THEN
+        INSERT INTO nombre_clients_par_carte (intitule_carte, nombre_de_clients) VALUES (NEW.typecarte, 1);
+    ELSE
+        UPDATE nombre_clients_par_carte SET nombre_de_clients = nombre_de_clients + 1 WHERE intitule_carte = NEW.typecarte;
+    END IF;
+END|
+
+CREATE TRIGGER before_client_update
+BEFORE UPDATE ON client
+FOR EACH ROW
+BEGIN
+    DECLARE old_typecarte VARCHAR(15);
+    
+    -- Récupération de l'ancien type de carte
+    SELECT typecarte INTO old_typecarte FROM client WHERE idcli = OLD.idcli;
+    
+    IF NEW.typecarte NOT IN ('or', 'argent', 'bronze') THEN
+        IF old_typecarte IN ('or', 'argent', 'bronze') THEN
+            SET NEW.typecarte = old_typecarte;
+        ELSE
+            SET NEW.typecarte = 'inconnue';
+        END IF;
+    END IF;
+
+    -- Mise à jour de la table nombre_clients_par_carte
+    IF old_typecarte != NEW.typecarte THEN
+        UPDATE nombre_clients_par_carte SET nombre_de_clients = nombre_de_clients - 1 WHERE intitule_carte = old_typecarte;
+        
+        IF NOT EXISTS (
+            SELECT 1 FROM nombre_clients_par_carte WHERE intitule_carte = NEW.typecarte
+        ) THEN
+            INSERT INTO nombre_clients_par_carte (intitule_carte, nombre_de_clients) VALUES (NEW.typecarte, 1);
+        ELSE
+            UPDATE nombre_clients_par_carte SET nombre_de_clients = nombre_de_clients + 1 WHERE intitule_carte = NEW.typecarte;
+        END IF;
+    END IF;
+END|
+
+DELIMITER ;
+
+-- Création de la vue
+CREATE VIEW vue_nombre_clients AS
+SELECT 
+    intitule_carte AS intitule_carte,
+    nombre_de_clients AS nombre_de_clients,
+    GROUP_CONCAT(CONCAT(prenomcli, ' ', nomcli) ORDER BY idcli SEPARATOR ', ') AS clients
+FROM client
+RIGHT JOIN nombre_clients_par_carte ON client.typecarte = nombre_clients_par_carte.intitule_carte
+GROUP BY intitule_carte;
+
+-- Insertion client 1
+INSERT INTO client(idcli, nomcli, prenomcli, typecarte) VALUES (15, 'Potter', 'Harry', 'or');
+
+-- Insertion client 2
+INSERT INTO client(idcli, nomcli, prenomcli, typecarte) VALUES (16, 'Weasley', 'Ron', 'argile');
+
+-- Insertion client 3
+INSERT INTO client(idcli, nomcli, prenomcli, typecarte) VALUES (17, 'Granger', 'Hermione', 'argent');
+
+-- Insertion client 4
+INSERT INTO client(idcli, nomcli, prenomcli, typecarte) VALUES (18, 'Dumbledore', 'Albus', 'or');
+
+-- Insertion client 5
+INSERT INTO client(idcli, nomcli, prenomcli, typecarte) VALUES (19, 'Rogue', 'Severus', 'bronze');
+
+-- Mise à jour client 1 - carte argent disparaît
+UPDATE client SET typecarte = 'bronze' WHERE idcli = 17;
+
+-- Mise à jour client 2 - pas de remplacement, on récupère l'ancienne valeur (or)
+UPDATE client SET typecarte = 'argile' WHERE idcli = 15;
+
+-- Mise à jour client 3 - carte argent apparaît
+UPDATE client SET typecarte = 'argent' WHERE idcli = 18;
+
+
+
+-- Utilisation de la vue avec un tri décroissant sur le nombre de clients.
+SELECT * FROM vue_nombre_clients ORDER BY nombre_de_clients DESC;
